@@ -4,6 +4,8 @@ const Constants = require('./src/util/Constants');
 
 module.exports = {
     Client: require('./src/Client'),
+
+    SingletonBrowser: require('./src/browser'),
     
     version: require('./package.json').version,
 

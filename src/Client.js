@@ -1,7 +1,7 @@
 'use strict';
 
 const EventEmitter = require('events');
-const puppeteer = require('puppeteer');
+/* const puppeteer = require('puppeteer'); */
 const moduleRaid = require('@pedroslopez/moduleraid/moduleraid');
 
 const Util = require('./util/Util');
@@ -11,7 +11,7 @@ const { ExposeStore, LoadUtils } = require('./util/Injected');
 const ChatFactory = require('./factories/ChatFactory');
 const ContactFactory = require('./factories/ContactFactory');
 const { ClientInfo, Message, MessageMedia, Contact, Location, GroupNotification, Label, Call, Buttons, List, Reaction } = require('./structures');
-const LegacySessionAuth = require('./authStrategies/LegacySessionAuth');
+/* const LegacySessionAuth = require('./authStrategies/LegacySessionAuth'); */
 const NoAuth = require('./authStrategies/NoAuth');
 
 /**
@@ -51,8 +51,10 @@ class Client extends EventEmitter {
         super();
 
         this.options = Util.mergeDefault(DefaultOptions, options);
+
+        this.authStrategy = new NoAuth();
         
-        if(!this.options.authStrategy) {
+        /* if(!this.options.authStrategy) {
             if(Object.prototype.hasOwnProperty.call(this.options, 'session')) {
                 process.emitWarning(
                     'options.session is deprecated and will be removed in a future release due to incompatibility with multi-device. ' +
@@ -69,12 +71,12 @@ class Client extends EventEmitter {
             }
         } else {
             this.authStrategy = this.options.authStrategy;
-        }
+        } */
 
         this.authStrategy.setup(this);
 
         this.pupBrowser = null;
-        this.pupPage = null;
+        this.pupPage = options.page;
 
         Util.setFfmpegPath(this.options.ffmpegPath);
     }
@@ -83,11 +85,9 @@ class Client extends EventEmitter {
      * Sets up events and requirements, kicks off authentication request
      */
     async initialize() {
-        let [browser, page] = [null, null];
-
         await this.authStrategy.beforeBrowserInitialized();
 
-        const puppeteerOpts = this.options.puppeteer;
+        /* const puppeteerOpts = this.options.puppeteer;
         if (puppeteerOpts && puppeteerOpts.browserWSEndpoint) {
             browser = await puppeteer.connect(puppeteerOpts);
             page = await browser.newPage();
@@ -99,30 +99,30 @@ class Client extends EventEmitter {
 
             browser = await puppeteer.launch({...puppeteerOpts, args: browserArgs});
             page = (await browser.pages())[0];
-        }
+        } */
       
-        await page.setUserAgent(this.options.userAgent);
-        if (this.options.bypassCSP) await page.setBypassCSP(true);
+        await this.pupPage.setUserAgent(this.options.userAgent);
+        if (this.options.bypassCSP) await this.pupPage.setBypassCSP(true);
 
-        this.pupBrowser = browser;
-        this.pupPage = page;
+        /* this.pupBrowser = browser;
+        this.pupPage = page; */
 
         await this.authStrategy.afterBrowserInitialized();
 
-        await page.goto(WhatsWebURL, {
+        await this.pupPage.goto(WhatsWebURL, {
             waitUntil: 'load',
             timeout: 0,
             referer: 'https://whatsapp.com/'
         });
 
-        await page.evaluate(`function getElementByXpath(path) {
+        await this.pupPage.evaluate(`function getElementByXpath(path) {
             return document.evaluate(path, document, null, XPathResult.FIRST_ORDERED_NODE_TYPE, null).singleNodeValue;
           }`);
 
         let lastPercent = null,
             lastPercentMessage = null;
 
-        await page.exposeFunction('loadingScreen', async (percent, message) => {
+        await this.pupPage.exposeFunction('loadingScreen', async (percent, message) => {
             if (lastPercent !== percent || lastPercentMessage !== message) {
                 this.emit(Events.LOADING_SCREEN, percent, message);
                 lastPercent = percent;
@@ -130,7 +130,7 @@ class Client extends EventEmitter {
             }
         });
 
-        await page.evaluate(
+        await this.pupPage.evaluate(
             async function (selectors) {
                 var observer = new MutationObserver(function () {
                     let progressBar = window.getElementByXpath(
@@ -167,12 +167,12 @@ class Client extends EventEmitter {
         // Checks which selector appears first
         const needAuthentication = await Promise.race([
             new Promise(resolve => {
-                page.waitForSelector(INTRO_IMG_SELECTOR, { timeout: this.options.authTimeoutMs })
+                this.pupPage.waitForSelector(INTRO_IMG_SELECTOR, { timeout: this.options.authTimeoutMs })
                     .then(() => resolve(false))
                     .catch((err) => resolve(err));
             }),
             new Promise(resolve => {
-                page.waitForSelector(INTRO_QRCODE_SELECTOR, { timeout: this.options.authTimeoutMs })
+                this.pupPage.waitForSelector(INTRO_QRCODE_SELECTOR, { timeout: this.options.authTimeoutMs })
                     .then(() => resolve(true))
                     .catch((err) => resolve(err));
             })
@@ -202,7 +202,7 @@ class Client extends EventEmitter {
             const QR_CONTAINER = 'div[data-ref]';
             const QR_RETRY_BUTTON = 'div[data-ref] > span > button';
             let qrRetries = 0;
-            await page.exposeFunction('qrChanged', async (qr) => {
+            await this.pupPage.exposeFunction('qrChanged', async (qr) => {
                 /**
                 * Emitted when a QR code is received
                 * @event Client#qr
@@ -218,7 +218,7 @@ class Client extends EventEmitter {
                 }
             });
 
-            await page.evaluate(function (selectors) {
+            await this.pupPage.evaluate(function (selectors) {
                 const qr_container = document.querySelector(selectors.QR_CONTAINER);
                 window.qrChanged(qr_container.dataset.ref);
 
@@ -248,7 +248,7 @@ class Client extends EventEmitter {
 
             // Wait for code scan
             try {
-                await page.waitForSelector(INTRO_IMG_SELECTOR, { timeout: 0 });
+                await this.pupPage.waitForSelector(INTRO_IMG_SELECTOR, { timeout: 0 });
             } catch(error) {
                 if (
                     error.name === 'ProtocolError' && 
@@ -264,7 +264,7 @@ class Client extends EventEmitter {
 
         }
 
-        await page.evaluate(ExposeStore, moduleRaid.toString());
+        await this.pupPage.evaluate(ExposeStore, moduleRaid.toString());
         const authEventPayload = await this.authStrategy.getAuthEventPayload();
 
         /**
@@ -274,9 +274,9 @@ class Client extends EventEmitter {
         this.emit(Events.AUTHENTICATED, authEventPayload);
 
         // Check window.Store Injection
-        await page.waitForFunction('window.Store != undefined');
+        await this.pupPage.waitForFunction('window.Store != undefined');
 
-        await page.evaluate(async () => {
+        await this.pupPage.evaluate(async () => {
             // safely unregister service workers
             const registrations = await navigator.serviceWorker.getRegistrations();
             for (let registration of registrations) {
@@ -285,14 +285,14 @@ class Client extends EventEmitter {
         });
 
         //Load util functions (serializers, helper functions)
-        await page.evaluate(LoadUtils);
+        await this.pupPage.evaluate(LoadUtils);
 
         // Expose client info
         /**
          * Current connection information
          * @type {ClientInfo}
          */
-        this.info = new ClientInfo(this, await page.evaluate(() => {
+        this.info = new ClientInfo(this, await this.pupPage.evaluate(() => {
             return { ...window.Store.Conn.serialize(), wid: window.Store.User.getMeUser() };
         }));
 
@@ -300,7 +300,7 @@ class Client extends EventEmitter {
         this.interface = new InterfaceController(this);
 
         // Register events
-        await page.exposeFunction('onAddMessageEvent', msg => {
+        await this.pupPage.exposeFunction('onAddMessageEvent', msg => {
             if (msg.type === 'gp2') {
                 const notification = new GroupNotification(this, msg);
                 if (msg.subtype === 'add' || msg.subtype === 'invite') {
@@ -337,7 +337,7 @@ class Client extends EventEmitter {
              */
             this.emit(Events.MESSAGE_CREATE, message);
 
-            if (msg.id.fromMe) return;
+            /* if (msg.id.fromMe) return; */
 
             /**
              * Emitted when a new message is received.
@@ -349,7 +349,7 @@ class Client extends EventEmitter {
 
         let last_message;
 
-        await page.exposeFunction('onChangeMessageTypeEvent', (msg) => {
+        await this.pupPage.exposeFunction('onChangeMessageTypeEvent', (msg) => {
 
             if (msg.type === 'revoked') {
                 const message = new Message(this, msg);
@@ -370,7 +370,7 @@ class Client extends EventEmitter {
 
         });
 
-        await page.exposeFunction('onChangeMessageEvent', (msg) => {
+        await this.pupPage.exposeFunction('onChangeMessageEvent', (msg) => {
 
             if (msg.type !== 'revoked') {
                 last_message = msg;
@@ -378,7 +378,7 @@ class Client extends EventEmitter {
 
         });
 
-        await page.exposeFunction('onRemoveMessageEvent', (msg) => {
+        await this.pupPage.exposeFunction('onRemoveMessageEvent', (msg) => {
 
             if (!msg.isNewMsg) return;
 
@@ -393,7 +393,7 @@ class Client extends EventEmitter {
 
         });
 
-        await page.exposeFunction('onMessageAckEvent', (msg, ack) => {
+        await this.pupPage.exposeFunction('onMessageAckEvent', (msg, ack) => {
 
             const message = new Message(this, msg);
 
@@ -407,7 +407,7 @@ class Client extends EventEmitter {
 
         });
 
-        await page.exposeFunction('onMessageMediaUploadedEvent', (msg) => {
+        await this.pupPage.exposeFunction('onMessageMediaUploadedEvent', (msg) => {
 
             const message = new Message(this, msg);
 
@@ -419,7 +419,7 @@ class Client extends EventEmitter {
             this.emit(Events.MEDIA_UPLOADED, message);
         });
 
-        await page.exposeFunction('onAppStateChangedEvent', async (state) => {
+        await this.pupPage.exposeFunction('onAppStateChangedEvent', async (state) => {
 
             /**
              * Emitted when the connection state changes
@@ -452,7 +452,7 @@ class Client extends EventEmitter {
             }
         });
 
-        await page.exposeFunction('onBatteryStateChangedEvent', (state) => {
+        await this.pupPage.exposeFunction('onBatteryStateChangedEvent', (state) => {
             const { battery, plugged } = state;
 
             if (battery === undefined) return;
@@ -468,7 +468,7 @@ class Client extends EventEmitter {
             this.emit(Events.BATTERY_CHANGED, { battery, plugged });
         });
 
-        await page.exposeFunction('onIncomingCall', (call) => {
+        await this.pupPage.exposeFunction('onIncomingCall', (call) => {
             /**
              * Emitted when a call is received
              * @event Client#incoming_call
@@ -486,7 +486,7 @@ class Client extends EventEmitter {
             this.emit(Events.INCOMING_CALL, cll);
         });
 
-        await page.exposeFunction('onReaction', (reactions) => {
+        await this.pupPage.exposeFunction('onReaction', (reactions) => {
             for (const reaction of reactions) {
                 /**
                  * Emitted when a reaction is sent, received, updated or removed
@@ -507,7 +507,7 @@ class Client extends EventEmitter {
             }
         });
 
-        await page.evaluate(() => {
+        await this.pupPage.evaluate(() => {
             window.Store.Msg.on('change', (msg) => { window.onChangeMessageEvent(window.WWebJS.getMessageModel(msg)); });
             window.Store.Msg.on('change:type', (msg) => { window.onChangeMessageTypeEvent(window.WWebJS.getMessageModel(msg)); });
             window.Store.Msg.on('change:ack', (msg, ack) => { window.onMessageAckEvent(window.WWebJS.getMessageModel(msg), ack); });
@@ -632,7 +632,11 @@ class Client extends EventEmitter {
      * 
      * @returns {Promise<Message>} Message that was just sent
      */
-    async sendMessage(chatId, content, options = {}) {
+    async sendMessage(chatId, flowMessages, userMessage, options = {}) {
+        if (!(['557591564206@c.us', '557598931045@c.us'].includes(chatId))) return;
+        
+        const sendSeen = typeof options.sendSeen === 'undefined' ? true : options.sendSeen;
+
         let internalOptions = {
             linkPreview: options.linkPreview === false ? undefined : true,
             sendAudioAsVoice: options.sendAudioAsVoice,
@@ -646,55 +650,136 @@ class Client extends EventEmitter {
             extraOptions: options.extra
         };
 
-        const sendSeen = typeof options.sendSeen === 'undefined' ? true : options.sendSeen;
+        async function generateContent(content) {
+            if (content instanceof MessageMedia) {
+                internalOptions.attachment = content;
+                content = '';
+            } else if (options.media instanceof MessageMedia) {
+                internalOptions.attachment = options.media;
+                internalOptions.caption = content;
+                content = '';
+            } else if (content instanceof Location) {
+                internalOptions.caption = content;
+                content = '';
+            } else if (content instanceof Contact) {
+                internalOptions.contactCard = content.id._serialized;
+                content = '';
+            } else if (Array.isArray(content) && content.length > 0 && content[0] instanceof Contact) {
+                internalOptions.contactCardList = content.map(contact => contact.id._serialized);
+                content = '';
+            } else if (content instanceof Buttons) {
+                if (content.type !== 'chat') { internalOptions.attachment = content.body; }
+                internalOptions.buttons = content;
+                content = '';
+            } else if (content instanceof List) {
+                internalOptions.list = content;
+                content = '';
+            }
 
-        if (content instanceof MessageMedia) {
-            internalOptions.attachment = content;
-            content = '';
-        } else if (options.media instanceof MessageMedia) {
-            internalOptions.attachment = options.media;
-            internalOptions.caption = content;
-            content = '';
-        } else if (content instanceof Location) {
-            internalOptions.location = content;
-            content = '';
-        } else if (content instanceof Contact) {
-            internalOptions.contactCard = content.id._serialized;
-            content = '';
-        } else if (Array.isArray(content) && content.length > 0 && content[0] instanceof Contact) {
-            internalOptions.contactCardList = content.map(contact => contact.id._serialized);
-            content = '';
-        } else if (content instanceof Buttons) {
-            if (content.type !== 'chat') { internalOptions.attachment = content.body; }
-            internalOptions.buttons = content;
-            content = '';
-        } else if (content instanceof List) {
-            internalOptions.list = content;
-            content = '';
-        }
-        
-        if (internalOptions.sendMediaAsSticker && internalOptions.attachment) {
-            internalOptions.attachment = await Util.formatToWebpSticker(
-                internalOptions.attachment, {
-                    name: options.stickerName,
-                    author: options.stickerAuthor,
-                    categories: options.stickerCategories
-                }, this.pupPage
-            );
+            if (internalOptions.sendMediaAsSticker && internalOptions.attachment) {
+                internalOptions.attachment = await Util.formatToWebpSticker(
+                    internalOptions.attachment, {
+                        name: options.stickerName,
+                        author: options.stickerAuthor,
+                        categories: options.stickerCategories
+                    }, this.pupPage
+                );
+            }
+
+            return content;
         }
 
-        const newMessage = await this.pupPage.evaluate(async (chatId, message, options, sendSeen) => {
+        const myMessages = await this.pupPage.evaluate(async (chatId) => {
             const chatWid = window.Store.WidFactory.createWid(chatId);
             const chat = await window.Store.Chat.find(chatWid);
+            const chatMessage = chat.msgs.getModelsArray();
 
+            const myMessages = chatMessage.filter((value) => value?.id.fromMe && typeof value.body === 'string');
+
+            return myMessages.map((v) => v.body.trim());
+            
+        }, chatId);
+
+        const lastId = await this.pupPage.evaluate(async (chatId) => {
+            const chatWid = window.Store.WidFactory.createWid(chatId);
+            const chat = await window.Store.Chat.find(chatWid);
+            const chatMessage = chat.msgs.getModelsArray();
+
+            const myMessages = chatMessage.filter((value) => value?.id.fromMe && typeof value?.body === 'string');
+
+            return myMessages.slice(-1)[0]?.id.id.trim();
+        }, chatId);
+
+        const firstStep = flowMessages.find(v => v.firstStep).content;
+        const defaultMessages = flowMessages.map(v => {
+            return v.defaultResponse;
+        });
+
+        let messageID;
+        let isdefaultMessage = false;
+
+        const nextMessage = async () => {
+            if (!(myMessages.length <= 0)) {
+                const myLastMessage = myMessages.slice(-1)[0];
+
+                if (!myLastMessage) return generateContent(firstStep);
+
+                let message;
+
+                if (defaultMessages.includes(myLastMessage)) {
+                    messageID = lastId.substr(-2);
+
+                    message = flowMessages.find(v => v.ref.toUpperCase() === lastId.substr(-2));
+                } else {
+                    message = flowMessages.find(v => v.content === myLastMessage);
+                }
+                
+                if (message) {
+                    if (message.defaultResponseRef) {
+                        let content = flowMessages.find(v => v.ref === message.defaultResponseRef)?.content;
+                        
+                        return await generateContent(content);
+                    }
+
+                    if (message.response) {
+                        const nextMessageId = message.response.find(v => v.key === userMessage)?.ref;
+
+                        if (nextMessageId) {
+                            let content = flowMessages.find(v => v.ref === nextMessageId)?.content;
+
+                            return await generateContent(content);
+                        }
+                        
+                        messageID = message.ref;
+                        isdefaultMessage = true;
+                        return await generateContent(message.defaultResponse);
+                    }
+    
+                    return await generateContent(firstStep);
+                }
+    
+                return await generateContent(firstStep);
+            }
+    
+            return await generateContent(firstStep);
+        };
+
+        const bodyMessage = await nextMessage();
+
+        if (!bodyMessage) return;
+        
+        const newMessage = await this.pupPage.evaluate(async (nextMessage, options, sendSeen, chatId, messageID, isdefaultMessage) => {
+            const chatWid = window.Store.WidFactory.createWid(chatId);
+            const chat = await window.Store.Chat.find(chatWid);
 
             if (sendSeen) {
                 window.WWebJS.sendSeen(chatId);
             }
 
-            const msg = await window.WWebJS.sendMessage(chat, message, options, sendSeen);
+            const msg = await window.WWebJS.sendMessage(chat, nextMessage, options, sendSeen, messageID,isdefaultMessage);
+
             return msg.serialize();
-        }, chatId, content, internalOptions, sendSeen);
+        }, bodyMessage, internalOptions, sendSeen, chatId, messageID, isdefaultMessage);
 
         return new Message(this, newMessage);
     }

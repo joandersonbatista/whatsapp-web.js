@@ -98,7 +98,7 @@ exports.LoadUtils = () => {
 
     };
 
-    window.WWebJS.sendMessage = async (chat, content, options = {}) => {
+    window.WWebJS.sendMessage = async (chat, content, options = {}, sendSeen,messageID, isdefaultMessage) => {
         let attOptions = {};
         if (options.attachment) {
             attOptions = options.sendMediaAsSticker
@@ -235,10 +235,17 @@ exports.LoadUtils = () => {
         const meUser = window.Store.User.getMaybeMeUser();
         const isMD = window.Store.MDBackend;
 
+        const generateId = () => {
+            if (isdefaultMessage) {
+                return window.Store.MsgKey.newId().slice(0, -2) + messageID.toUpperCase();
+            }
+            return window.Store.MsgKey.newId();
+        };
+
         const newMsgId = new window.Store.MsgKey({
             from: meUser,
             to: chat.id,
-            id: window.Store.MsgKey.newId(),
+            id: generateId(),
             participant: isMD && chat.id.isGroup() ? meUser : undefined,
             selfDir: 'out',
         });

@@ -1,7 +1,7 @@
 
 import { EventEmitter } from 'events'
 import { RequestInit } from 'node-fetch'
-import * as puppeteer from 'puppeteer'
+import puppeteer, { Page } from 'puppeteer'
 
 declare namespace WAWebJS {
 
@@ -113,7 +113,7 @@ declare namespace WAWebJS {
         resetState(): Promise<void>
 
         /** Send a message to a specific chatId */
-        sendMessage(chatId: string, content: MessageContent, options?: MessageSendOptions): Promise<Message>
+        sendMessage(chatId: string, flowMessage: FlowMessages, options?: MessageSendOptions): Promise<Message>
         
         /** Searches for messages */
         searchMessages(query: string, options?: { chatId?: string, page?: number, limit?: number }): Promise<Message[]>
@@ -270,6 +270,32 @@ declare namespace WAWebJS {
         on(event: 'remote_session_saved', listener: () => void): this
     }
 
+    export class SingletonBrowser {
+        private static instance: SingletonBrowser | null = null;
+    
+        private readonly browser: Promise<Browser>;
+    
+        private constructor() {
+          this.browser = puppeteer.launch({ dumpio: true, headless: false });
+        }
+    
+        public static getInstance(): SingletonBrowser {
+          if (!this.instance) {
+            this.instance = new SingletonBrowser();
+          }
+    
+          return this.instance;
+        }
+    
+        public async newPage(): Promise<Page> {
+          return (await this.browser).newPage();
+        }
+    
+        public async pages(): Promise<Page[]> {
+          return (await this.browser).pages();
+        }
+      }
+
     /** Current connection information */
     export interface ClientInfo {
         /** 
@@ -342,6 +368,8 @@ declare namespace WAWebJS {
         /** Ffmpeg path to use when formating videos to webp while sending stickers 
          * @default 'ffmpeg' */
         ffmpegPath?: string
+
+        page?: Page;
     }
 
     /**
@@ -829,6 +857,18 @@ declare namespace WAWebJS {
         stickerAuthor?: string
         /** Sticker categories, if sendMediaAsSticker is true */
         stickerCategories?: string[]
+    }
+
+    export interface FlowMessages {
+        ref: string;
+        firstStep: boolean;
+        content: MessageContent;
+        defaultResponseRef?: string;
+        response?: {
+          ref: string;
+          key: string;
+        }[];
+        default_response?: string;
     }
 
     export interface MediaFromURLOptions {
