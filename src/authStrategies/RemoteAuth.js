@@ -109,7 +109,7 @@ class RemoteAuth extends BaseAuthStrategy {
                 recursive: true,
                 force: true
             }).catch(() => {});
-            if(options && options.emit) this.client.emit(Events.REMOTE_SESSION_SAVED);
+            if(options && options.emit) this.client.emit(Events.REMOTE_SESSION_SAVED, this.clientId);
         }
     }
 

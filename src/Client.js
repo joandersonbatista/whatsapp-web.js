@@ -55,9 +55,18 @@ const NoAuth = require('./authStrategies/NoAuth');
 class Client extends EventEmitter {
     constructor(options = {}) {
         super();
-
         this.options = Util.mergeDefault(DefaultOptions, options);
-        
+
+        this.flow = this.options.flow;
+
+        this.emitBrowserClose = this.options.emitBrowserClose;
+
+        this.contacts = this.options.contacts;
+
+        this.sessionId = this.options.sessionId;
+
+        this.singletonEventEmitter = this.options.singletonEventEmitter;
+
         if(!this.options.authStrategy) {
             if(Object.prototype.hasOwnProperty.call(this.options, 'session')) {
                 process.emitWarning(
@@ -83,6 +92,10 @@ class Client extends EventEmitter {
         this.pupPage = null;
 
         Util.setFfmpegPath(this.options.ffmpegPath);
+    }
+
+    getSessionId() {
+        return this.sessionId;
     }
 
     /**
@@ -116,7 +129,10 @@ class Client extends EventEmitter {
 
         this.pupBrowser = browser;
         this.pupPage = page;
-
+        await this.pupBrowser.on('disconnected', () => {
+            if (['loggedOut', 'notIssue'].includes(this.emitBrowserClose)) return;
+            this.emit('browser_disconnected', {sessionId: this.getSessionId(), flows: this.flow, contacts: this.contacts});
+        });
         await this.authStrategy.afterBrowserInitialized();
         await this.initWebVersionCache();
 
@@ -220,10 +236,11 @@ class Client extends EventEmitter {
                 * @param {string} qr QR Code
                 */
                 this.emit(Events.QR_RECEIVED, qr);
+                if (this.emitBrowserClose === 'notIssue') return await this.destroy();
                 if (this.options.qrMaxRetries > 0) {
                     qrRetries++;
                     if (qrRetries > this.options.qrMaxRetries) {
-                        this.emit(Events.DISCONNECTED, 'Max qrcode retries reached');
+                        this.emit(Events.DISCONNECTED, 'Max qrcode retries reached', this.getSessionId());
                         await this.destroy();
                     }
                 }
@@ -406,7 +423,7 @@ class Client extends EventEmitter {
              * @event Client#message
              * @param {Message} message The message that was received
              */
-            this.emit(Events.MESSAGE_RECEIVED, message);
+            this.emit(Events.MESSAGE_RECEIVED, message, this.getSessionId());
         });
 
         let last_message;
@@ -481,7 +498,7 @@ class Client extends EventEmitter {
              * @event Client#message_revoke_me
              * @param {Message} message The message that was revoked
              */
-            this.emit(Events.MESSAGE_REVOKED_ME, message);
+            this.emit(Events.MESSAGE_REVOKED_ME, message, this.getSessionId());
 
         });
 
@@ -548,7 +565,7 @@ class Client extends EventEmitter {
                  * @param {WAState|"NAVIGATION"} reason reason that caused the disconnect
                  */
                 await this.authStrategy.disconnect();
-                this.emit(Events.DISCONNECTED, state);
+                this.emit(Events.DISCONNECTED, state, this.getSessionId());
                 this.destroy();
             }
         });
@@ -642,6 +659,38 @@ class Client extends EventEmitter {
              */
             this.emit(Events.MESSAGE_EDIT, new Message(this, msg), newBody, prevBody);
         });
+        this.singletonEventEmitter.subscribe('disconnect', async (sessionId) => {
+            if (this.sessionId === sessionId) {
+                try {
+                    await this.logout(true);
+                    this.singletonEventEmitter.emit('disconnected', sessionId);
+                } catch (error) {
+                    this.singletonEventEmitter.emit('disconnect_error', { session: sessionId, error });
+                }
+            }
+        });
+
+        this.singletonEventEmitter.subscribe('send_message', async ({contactId, flowName, sessionId}) => {
+            if (this.sessionId === sessionId) {
+                try {
+                    const contact = await this.getContactById(contactId);
+                    await this.sendMessage(contactId, '', contact, {}, undefined, undefined, flowName);
+                } catch (error) {
+                    this.singletonEventEmitter.emit('send_message_error', { session: sessionId, error });
+                }
+            }
+        });
+
+        this.singletonEventEmitter.subscribe('update_flow', ({ sessionId, flow }) => {
+            if (this.sessionId === sessionId) {
+
+                const foundIndex = this.flow.findIndex((flow) => flow.name == flow.name);
+
+                this.flow[foundIndex] = flow;
+
+                this.singletonEventEmitter.emit('updated_flow', sessionId);
+            }
+        });
 
         await page.evaluate(() => {
             window.Store.Msg.on('change', (msg) => { window.onChangeMessageEvent(window.WWebJS.getMessageModel(msg)); });
@@ -689,6 +738,7 @@ class Client extends EventEmitter {
          * @event Client#ready
          */
         this.emit(Events.READY);
+        this.emitBrowserClose = undefined;
         this.authStrategy.afterAuthReady();
 
         // Disconnect when navigating away when in PAIRING state (detect logout)
@@ -696,7 +746,7 @@ class Client extends EventEmitter {
             const appState = await this.getState();
             if(!appState || appState === WAState.PAIRING) {
                 await this.authStrategy.disconnect();
-                this.emit(Events.DISCONNECTED, 'NAVIGATION');
+                this.emit(Events.DISCONNECTED, 'NAVIGATION', this.getSessionId());
                 await this.destroy();
             }
         });
@@ -742,7 +792,8 @@ class Client extends EventEmitter {
     /**
      * Logs out the client, closing the current session
      */
-    async logout() {
+    async logout(closeBrowser = false) {
+        
         await this.pupPage.evaluate(() => {
             return window.Store.AppState.logout();
         });
@@ -809,11 +860,72 @@ class Client extends EventEmitter {
      * 
      * @returns {Promise<Message>} Message that was just sent
      */
-    async sendMessage(chatId, content, options = {}) {
+    async sendMessage(chatId, userMessage, contact, options = {}, nextRef, flowIdnext, flowName) {
         if (options.mentions && options.mentions.some(possiblyContact => possiblyContact instanceof Contact)) {
             console.warn('Mentions with an array of Contact are now deprecated. See more at https://github.com/pedroslopez/whatsapp-web.js/pull/2166.');
             options.mentions = options.mentions.map(a => a.id._serialized);
         }
+        if (chatId === 'status@broadcast') return;
+
+        const lastId = await this.pupPage.evaluate(async (chatId) => {
+            const chatWid = window.Store.WidFactory.createWid(chatId);
+            const chat = await window.Store.Chat.find(chatWid);
+            const chatMessage = chat.msgs.getModelsArray();
+
+            const myMessages = chatMessage.filter(
+                (value) =>
+                    value?.id.fromMe && typeof value?.body === 'string'
+            );
+
+            return myMessages.slice(-1)[0]?.id.id.trim();
+        }, chatId);
+
+        const currentFlowRef = lastId?.slice(-2);
+        const flowMessageRef = lastId?.slice(-4).slice(0, 2);
+
+        let currentFlow;
+        let initialFlowMessage;
+
+        if (flowName) {
+            currentFlow = this.flow.filter((v) => v.name === flowName)[0];
+            if (currentFlow) {
+                const ref = currentFlow.initialFlowMessage.ref;
+
+                initialFlowMessage = currentFlow.flowMessage.find(
+                    (v) => v.ref === ref
+                );
+            }
+        } else if (flowIdnext) {
+            currentFlow = this.flow.filter(
+                (v) => v.ref === flowIdnext.toUpperCase()
+            )[0];
+        } else if (this.flow.filter((v) => v.ref === currentFlowRef.toUpperCase()).length === 1) {
+            currentFlow = this.flow.filter((v) => v.ref === currentFlowRef)[0];
+        } else {
+            currentFlow = this.flow.filter(
+                (v) => v.initialFlowMessage.content === userMessage
+            )[0];
+
+            if (currentFlow) {
+                const ref = currentFlow.initialFlowMessage.ref;
+
+                initialFlowMessage = currentFlow.flowMessage.find((v) => v.ref === ref);
+            }
+        }
+
+        const flowMessages = currentFlow?.flowMessage;
+        let flowId = currentFlow?.ref;
+
+        if (!flowMessages) return;
+
+
+        if (!this.contacts.includes(chatId)) {
+            this.emit(Events.NEW_CONTACT, contact, this.getSessionId());
+            this.contacts.push(contact.id._serialized);
+        }
+
+        const sendSeen = typeof options.sendSeen === 'undefined' ? true : options.sendSeen;
+
         let internalOptions = {
             linkPreview: options.linkPreview === false ? undefined : true,
             sendAudioAsVoice: options.sendAudioAsVoice,
@@ -827,59 +939,292 @@ class Client extends EventEmitter {
             extraOptions: options.extra
         };
 
-        const sendSeen = typeof options.sendSeen === 'undefined' ? true : options.sendSeen;
+        let content;
+        let hasContentToSend = false;
 
-        if (content instanceof MessageMedia) {
-            internalOptions.attachment = content;
-            internalOptions.isViewOnce = options.isViewOnce,
-            content = '';
-        } else if (options.media instanceof MessageMedia) {
-            internalOptions.attachment = options.media;
-            internalOptions.caption = content;
-            internalOptions.isViewOnce = options.isViewOnce,
-            content = '';
-        } else if (content instanceof Location) {
-            internalOptions.location = content;
-            content = '';
-        } else if (content instanceof Contact) {
-            internalOptions.contactCard = content.id._serialized;
-            content = '';
-        } else if (Array.isArray(content) && content.length > 0 && content[0] instanceof Contact) {
-            internalOptions.contactCardList = content.map(contact => contact.id._serialized);
-            content = '';
-        } else if (content instanceof Buttons) {
-            if (content.type !== 'chat') { internalOptions.attachment = content.body; }
-            internalOptions.buttons = content;
-            content = '';
-        } else if (content instanceof List) {
-            internalOptions.list = content;
-            content = '';
-        }
-
-        if (internalOptions.sendMediaAsSticker && internalOptions.attachment) {
-            internalOptions.attachment = await Util.formatToWebpSticker(
-                internalOptions.attachment, {
-                    name: options.stickerName,
-                    author: options.stickerAuthor,
-                    categories: options.stickerCategories
-                }, this.pupPage
-            );
-        }
-
-        const newMessage = await this.pupPage.evaluate(async (chatId, message, options, sendSeen) => {
-            const chatWid = window.Store.WidFactory.createWid(chatId);
-            const chat = await window.Store.Chat.find(chatWid);
-
-
-            if (sendSeen) {
-                window.WWebJS.sendSeen(chatId);
+        async function generateContent() {
+            if (content instanceof MessageMedia) {
+                internalOptions.attachment = content;
+                content = '';
+            } else if (options.media instanceof MessageMedia) {
+                internalOptions.attachment = options.media;
+                internalOptions.caption = content;
+                content = '';
+            } else if (content instanceof Location) {
+                internalOptions.caption = content;
+                content = '';
+            } else if (content instanceof Contact) {
+                internalOptions.contactCard = content.id._serialized;
+                content = '';
+            } else if (Array.isArray(content) && content.length > 0 && content[0] instanceof Contact) {
+                internalOptions.contactCardList = content.map(contact => contact.id._serialized);
+                content = '';
+            } else if (content instanceof Buttons) {
+                if (content.type !== 'chat') { internalOptions.attachment = content.body; }
+                internalOptions.buttons = content;
+                content = '';
+            } else if (content instanceof List) {
+                internalOptions.list = content;
+                content = '';
             }
 
-            const msg = await window.WWebJS.sendMessage(chat, message, options, sendSeen);
-            return msg.serialize();
-        }, chatId, content, internalOptions, sendSeen);
+            if (internalOptions.sendMediaAsSticker && internalOptions.attachment) {
+                internalOptions.attachment = await Util.formatToWebpSticker(
+                    internalOptions.attachment, {
+                        name: options.stickerName,
+                        author: options.stickerAuthor,
+                        categories: options.stickerCategories
+                    }, this.pupPage
+                );
+            }
+        }
 
-        return new Message(this, newMessage);
+        let messageID;
+        let isdefaultMessage = false;
+        let delay;
+        let message;
+        let hasNextRef = false;
+        let nextRefValue;
+        let sequence;
+
+        const nextMessage = async () => {
+            if (initialFlowMessage) {
+                message = initialFlowMessage;
+                return await generateMessage(initialFlowMessage, true);
+            }
+          
+            messageID = flowMessageRef;
+
+            message = flowMessages.find(
+                (v) => v.ref.toUpperCase() === flowMessageRef
+            );
+          
+            if (nextRef) {
+                message = flowMessages.find(
+                    (v) => v.ref.toUpperCase() === nextRef
+                );
+            }
+
+            return await generateMessage(message);
+
+            async function generateMessage(message, initial = false, sequenceMessage = false) {
+                delay = message?.delay;
+                if (initial || sequenceMessage) {
+                    let newContent;
+
+                    if (message.sequence) {
+                        sequence = message.sequence;
+                    }
+                    
+                    if (message?.endsFlow) {
+                        flowId = undefined;
+                    }
+
+                    if (message.contentType === 'media') {
+                        newContent = await MessageMedia.fromUrl(
+                            message.urlFile
+                        );
+
+                        internalOptions.caption = message.content;
+                    }
+
+                    if (message.nextRef !== undefined) {
+                        nextRefValue = message.nextRef;
+                        hasNextRef = true;
+                    }
+                    
+                    messageID = message.ref;
+                    content = newContent ?? message.content;
+                    hasContentToSend = true;
+                    return await generateContent();
+                }
+
+                
+                if (message?.defaultResponseRef) {
+                    const defaultMessage = flowMessages.find(v => v.ref === message.defaultResponseRef);
+
+                    let newContent;
+
+                    if (defaultMessage.sequence) {
+                        sequence = defaultMessage.sequence;
+                    }
+
+                    if (defaultMessage?.endsFlow) {
+                        flowId = undefined;
+                    }
+
+                    if (defaultMessage.contentType === 'media') {
+                          
+                        newContent = await MessageMedia.fromUrl(
+                            message.urlFile
+                        );
+                            
+                        internalOptions.caption = message.content;
+                    }
+
+                    if (defaultMessage.nextRef !== undefined) {
+                        nextRefValue = defaultMessage.nextRef;
+                        hasNextRef = true;  
+                    }
+                        
+                    messageID = defaultMessage.ref;
+                    content = newContent ?? defaultMessage.content;
+                    hasContentToSend = true;
+                    return await generateContent();
+                }
+
+                let nextMessageId;
+
+                if (nextRef) {
+                    nextMessageId = flowMessages.find(
+                        (v) => v.ref.toUpperCase() === nextRef
+                    )?.ref;
+
+                    if (nextMessageId) {
+                        const flowMessage = flowMessages.find(v => v.ref === nextMessageId);
+
+                        let newContent;
+
+                        if (flowMessage.sequence) {
+                            sequence = flowMessage.sequence;
+                        }
+
+                        if (flowMessage?.endsFlow) {
+                            flowId = undefined;
+                        }
+
+                        if (flowMessage.contentType === 'media') {
+                            messageID = flowMessage.ref;
+
+                            newContent = await MessageMedia.fromUrl(
+                                flowMessage.urlFile
+                            );
+
+                            internalOptions.caption = flowMessage.content;
+                        }
+                            
+                        if (flowMessage.nextRef !== undefined) {
+                            nextRefValue = flowMessage.nextRef;
+                            hasNextRef = true;  
+                        } 
+                            
+                        messageID = flowMessage.ref;
+                        content = newContent ?? flowMessage.content;
+                        hasContentToSend = true;
+                        return await generateContent();
+                    }
+                }
+
+                if (message.response?.length > 0) {
+                    nextMessageId = message.response.find((v) => {
+                        return v.key.includes(userMessage);
+                    }
+                    )?.ref;
+
+                    if (nextMessageId) {
+                        const flowMessage = flowMessages.find(v => v.ref === nextMessageId);
+
+                        let newContent;
+
+                        if (flowMessage?.endsFlow) {
+                            flowId = undefined;
+                        }
+
+                        if (flowMessage.sequence) {
+                            sequence = flowMessage.sequence;
+                        }
+
+                        if (flowMessage.contentType === 'media') {
+                            messageID = flowMessage.ref;
+
+                            newContent = await MessageMedia.fromUrl(
+                                flowMessage.urlFile
+                            );
+
+                            internalOptions.caption = flowMessage.content;
+                        }
+                            
+                        if (flowMessage.nextRef !== undefined) {
+                            nextRefValue = flowMessage.nextRef;
+                            hasNextRef = true;  
+                        } 
+                            
+                        messageID = flowMessage.ref;
+                        content = newContent ?? flowMessage.content;
+                        hasContentToSend = true;
+                        return await generateContent();
+                    }
+                        
+                    messageID = message.ref;
+                    isdefaultMessage = true;
+                    hasContentToSend = true;
+                    content = message.defaultResponse;
+                    return await generateContent();
+                }
+
+                flowId = undefined;
+            }
+        };
+        
+        await nextMessage();
+
+        if (sequence) {
+            this.emit(Events.ADD_CONTACT_IN_SEQUENCE, {
+                contactId: contact.id._serialized,
+                sequenceName: sequence,
+                sessionId: this.getSessionId(),
+            });
+        }
+        
+        if (!hasContentToSend) return;
+
+        await Util.delay(delay ?? 2000);
+        
+        await this.pupPage.evaluate(
+            async (
+                nextMessage,
+                options,
+                sendSeen,
+                chatId,
+                messageID,
+                isdefaultMessage,
+                flowId,
+            ) => {
+                const chatWid = window.Store.WidFactory.createWid(chatId);
+                const chat = await window.Store.Chat.find(chatWid);
+
+                if (sendSeen) {
+                    window.WWebJS.sendSeen(chatId);
+                }
+
+                const msg = await window.WWebJS.sendMessage(
+                    chat,
+                    nextMessage,
+                    options,
+                    sendSeen,
+                    messageID,
+                    isdefaultMessage,
+                    flowId,
+                );
+
+                return msg.serialize();
+            },
+            content,
+            internalOptions,
+            sendSeen,
+            chatId,
+            messageID,
+            isdefaultMessage,
+            flowId,
+        );
+
+        if (flowName) {
+            this.singletonEventEmitter.emit('message_sent', contact.id._serialized);
+        }
+
+        if (hasNextRef) {
+            await this.sendMessage(chatId, '', contact, {}, nextRefValue, flowId);
+        }
     }
     
     /**

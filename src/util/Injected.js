@@ -118,7 +118,15 @@ exports.LoadUtils = () => {
 
     };
 
-    window.WWebJS.sendMessage = async (chat, content, options = {}) => {
+    window.WWebJS.sendMessage = async (
+        chat,
+        content,
+        options = {},
+        sendSeen,
+        messageID,
+        isdefaultMessage,
+        flowId,
+    ) => {
         let attOptions = {};
         if (options.attachment) {
             attOptions = options.sendMediaAsSticker
@@ -126,7 +134,7 @@ exports.LoadUtils = () => {
                 : await window.WWebJS.processMediaData(options.attachment, {
                     forceVoice: options.sendAudioAsVoice,
                     forceDocument: options.sendMediaAsDocument,
-                    forceGif: options.sendVideoAsGif
+                    forceGif: options.sendVideoAsGif,
                 });
             
             if (options.caption){
@@ -143,9 +151,9 @@ exports.LoadUtils = () => {
             let quotedMessage = window.Store.Msg.get(options.quotedMessageId);
 
             // TODO remove .canReply() once all clients are updated to >= v2.2241.6
-            const canReply = window.Store.ReplyUtils ? 
-                window.Store.ReplyUtils.canReplyMsg(quotedMessage.unsafe()) : 
-                quotedMessage.canReply();
+            const canReply = window.Store.ReplyUtils
+                ? window.Store.ReplyUtils.canReplyMsg(quotedMessage.unsafe())
+                : quotedMessage.canReply();
 
             if (canReply) {
                 quotedMsgOptions = quotedMessage.msgContextInfo(chat);
@@ -154,7 +162,9 @@ exports.LoadUtils = () => {
         }
 
         if (options.mentionedJidList) {
-            options.mentionedJidList = options.mentionedJidList.map(cId => window.Store.Contact.get(cId).id);
+            options.mentionedJidList = options.mentionedJidList.map(
+                (cId) => window.Store.Contact.get(cId).id
+            );
         }
 
         let locationOptions = {};
@@ -163,7 +173,7 @@ exports.LoadUtils = () => {
                 type: 'location',
                 loc: options.location.description,
                 lat: options.location.latitude,
-                lng: options.location.longitude
+                lng: options.location.longitude,
             };
             delete options.location;
         }
@@ -174,26 +184,35 @@ exports.LoadUtils = () => {
             vcardOptions = {
                 body: window.Store.VCard.vcardFromContactModel(contact).vcard,
                 type: 'vcard',
-                vcardFormattedName: contact.formattedName
+                vcardFormattedName: contact.formattedName,
             };
             delete options.contactCard;
         } else if (options.contactCardList) {
-            let contacts = options.contactCardList.map(c => window.Store.Contact.get(c));
-            let vcards = contacts.map(c => window.Store.VCard.vcardFromContactModel(c));
+            let contacts = options.contactCardList.map((c) =>
+                window.Store.Contact.get(c)
+            );
+            let vcards = contacts.map((c) =>
+                window.Store.VCard.vcardFromContactModel(c)
+            );
             vcardOptions = {
                 type: 'multi_vcard',
                 vcardList: vcards,
-                body: undefined
+                body: undefined,
             };
             delete options.contactCardList;
-        } else if (options.parseVCards && typeof (content) === 'string' && content.startsWith('BEGIN:VCARD')) {
+        } else if (
+            options.parseVCards &&
+            typeof content === 'string' &&
+            content.startsWith('BEGIN:VCARD')
+        ) {
             delete options.parseVCards;
             try {
                 const parsed = window.Store.VCard.parseVcard(content);
                 if (parsed) {
                     vcardOptions = {
                         type: 'vcard',
-                        vcardFormattedName: window.Store.VCard.vcardGetNameFromParsed(parsed)
+                        vcardFormattedName:
+                            window.Store.VCard.vcardGetNameFromParsed(parsed),
                     };
                 }
             } catch (_) {
@@ -205,19 +224,21 @@ exports.LoadUtils = () => {
             delete options.linkPreview;
 
             // Not supported yet by WhatsApp Web on MD
-            if(!window.Store.MDBackend) {
+            if (!window.Store.MDBackend) {
                 const link = window.Store.Validators.findLink(content);
                 if (link) {
-                    const preview = await window.Store.Wap.queryLinkPreview(link.url);
+                    const preview = await window.Store.Wap.queryLinkPreview(
+                        link.url
+                    );
                     preview.preview = true;
                     preview.subtype = 'url';
                     options = { ...options, ...preview };
                 }
             }
         }
-        
+
         let buttonOptions = {};
-        if(options.buttons){
+        if (options.buttons) {
             let caption;
             if (options.buttons.type === 'chat') {
                 content = options.buttons.body;
@@ -229,11 +250,15 @@ exports.LoadUtils = () => {
                 productHeaderImageRejected: false,
                 isFromTemplate: false,
                 isDynamicReplyButtonsMsg: true,
-                title: options.buttons.title ? options.buttons.title : undefined,
-                footer: options.buttons.footer ? options.buttons.footer : undefined,
+                title: options.buttons.title
+                    ? options.buttons.title
+                    : undefined,
+                footer: options.buttons.footer
+                    ? options.buttons.footer
+                    : undefined,
                 dynamicReplyButtons: options.buttons.buttons,
                 replyButtons: options.buttons.buttons,
-                caption: caption
+                caption: caption,
             };
             delete options.buttons;
         }
@@ -248,9 +273,9 @@ exports.LoadUtils = () => {
                 footer: options.list.footer,
                 list: {
                     ...options.list,
-                    listType: 1
+                    listType: 1,
                 },
-                body: options.list.description
+                body: options.list.description,
             };
             delete options.list;
             delete listOptions.list.footer;
@@ -258,12 +283,26 @@ exports.LoadUtils = () => {
 
         const meUser = window.Store.User.getMaybeMeUser();
         const isMD = window.Store.MDBackend;
-        const newId = await window.Store.MsgKey.newId();
-        
+
+        const generateId = async () => {
+            let flowMessageId;
+            const id = await window.Store.MsgKey.newId();
+            if (flowId && messageID) {
+                flowMessageId =
+                    id.slice(0, -4) +
+                    messageID.toUpperCase() +
+                    flowId.toUpperCase();
+            } else {
+                flowMessageId = id;
+            }
+
+            return flowMessageId;
+        };
+
         const newMsgId = new window.Store.MsgKey({
             from: meUser,
             to: chat.id,
-            id: newId,
+            id: await generateId(),
             participant: isMD && chat.id.isGroup() ? meUser : undefined,
             selfDir: 'out',
         });
@@ -271,7 +310,8 @@ exports.LoadUtils = () => {
         const extraOptions = options.extraOptions || {};
         delete options.extraOptions;
 
-        const ephemeralFields = window.Store.EphemeralFields.getEphemeralFields(chat);
+        const ephemeralFields =
+            window.Store.EphemeralFields.getEphemeralFields(chat);
 
         const message = {
             ...options,
@@ -293,7 +333,7 @@ exports.LoadUtils = () => {
             ...vcardOptions,
             ...buttonOptions,
             ...listOptions,
-            ...extraOptions
+            ...extraOptions,
         };
 
         await window.Store.SendMessage.addAndSendMsgToChat(chat, message);

@@ -174,6 +174,10 @@ class Util {
         return webpMedia;
     }
 
+    static async delay(ms) {
+        return new Promise((res) => setTimeout(res, ms));
+    }
+
     /**
      * Configure ffmpeg path
      * @param {string} path

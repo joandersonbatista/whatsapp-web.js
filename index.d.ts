@@ -119,7 +119,9 @@ declare namespace WAWebJS {
         resetState(): Promise<void>
 
         /** Send a message to a specific chatId */
-        sendMessage(chatId: string, content: MessageContent, options?: MessageSendOptions): Promise<Message>
+        sendMessage(chatId: string, userMessage: string, contact: Contact, options?: MessageSendOptions): Promise<Message>
+
+        getSessionId(): string
         
         /** Searches for messages */
         searchMessages(query: string, options?: { chatId?: string, page?: number, limit?: number }): Promise<Message[]>
@@ -189,7 +191,8 @@ declare namespace WAWebJS {
         /** Emitted when the client has been disconnected */
         on(event: 'disconnected', listener: (
             /** reason that caused the disconnect */
-            reason: WAState | "NAVIGATION"
+            reason: WAState | "NAVIGATION",
+            sessionId: string,
         ) => void): this
 
         /** Emitted when a user joins the chat via invite link or is added by an admin */
@@ -237,7 +240,13 @@ declare namespace WAWebJS {
         /** Emitted when a new message is received */
         on(event: 'message', listener: (
             /** The message that was received */
-            message: Message
+            message: Message,
+            sessionId: string,
+        ) => void): this
+
+        on(event: 'new_contact', listener: (
+            contact: Contact,
+            sessionId: string,
         ) => void): this
 
         /** Emitted when an ack event occurrs on message type */
@@ -374,9 +383,18 @@ declare namespace WAWebJS {
 
     /** Options for initializing the whatsapp client */
     export interface ClientOptions {
+        flow: Flow[];
+
+        singletonEventEmitter: SingletonEventEmitter;
+
+        sessionId: string;
+
+        emitBrowserClose?: 'loggedOut' | 'notIssue';
+
+        contacts: string[];
         /** Timeout for authentication selector in puppeteer
          * @default 0 */
-        authTimeoutMs?: number,
+        authTimeoutMs?: number;
         /** Puppeteer launch options. View docs here: https://github.com/puppeteer/puppeteer/ */
         puppeteer?: puppeteer.PuppeteerNodeLaunchOptions & puppeteer.ConnectOptions
 		/** Determines how to save and restore sessions. Will use LegacySessionAuth if options.session is set. Otherwise, NoAuth will be used. */
@@ -386,26 +404,26 @@ declare namespace WAWebJS {
         /**  Determines how to retrieve the WhatsApp Web version specified in options.webVersion. */
         webVersionCache?: WebCacheOptions,
         /** How many times should the qrcode be refreshed before giving up
-		 * @default 0 (disabled) */
-		qrMaxRetries?: number,
-        /** 
+         * @default 0 (disabled) */
+        qrMaxRetries?: number;
+        /**
          * @deprecated This option should be set directly on the LegacySessionAuth
          */
-        restartOnAuthFail?: boolean
-        /** 
-         * @deprecated Only here for backwards-compatibility. You should move to using LocalAuth, or set the authStrategy to LegacySessionAuth explicitly.  
+        restartOnAuthFail?: boolean;
+        /**
+         * @deprecated Only here for backwards-compatibility. You should move to using LocalAuth, or set the authStrategy to LegacySessionAuth explicitly.
          */
-        session?: ClientSession
+        session?: ClientSession;
         /** If another whatsapp web session is detected (another browser), take over the session in the current browser
          * @default false */
-        takeoverOnConflict?: boolean,
+        takeoverOnConflict?: boolean;
         /** How much time to wait before taking over the session
          * @default 0 */
-        takeoverTimeoutMs?: number,
+        takeoverTimeoutMs?: number;
         /** User agent to use in puppeteer.
          * @default 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_14_0) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/72.0.3626.109 Safari/537.36' */
-        userAgent?: string
-        /** Ffmpeg path to use when formating videos to webp while sending stickers 
+        userAgent?: string;
+        /** Ffmpeg path to use when formating videos to webp while sending stickers
          * @default 'ffmpeg' */
         ffmpegPath?: string,
         /** Object with proxy autentication requirements @default: undefined */
@@ -479,6 +497,17 @@ declare namespace WAWebJS {
             dataPath?: string,
             backupSyncIntervalMs: number
         })
+     }
+    
+     export class MongoStore implements Store {
+        constructor(options: {
+            mongoose: any
+        })
+    
+        sessionExists: (options: { session: string }) => Promise<boolean> | boolean;
+        delete: (options: { session: string }) => Promise<any> | any;
+        save: (options: { session: string }) => Promise<any> | any;
+        extract: (options: { session: string, path: string }) => Promise<any> | any;
     }
 
     /** 
@@ -1493,6 +1522,49 @@ declare namespace WAWebJS {
         aggregateEmoji: string,
         hasReactionByMe: boolean,
         senders: Array<Reaction>
+    }
+
+    export type EventEmitterCallback = (...args: any[]) => void;
+
+    export class SingletonEventEmitter {
+        private static instance: SingletonEventEmitter | null;
+
+        private constructor();
+
+        public static getInstance(): SingletonEventEmitter;
+
+        public subscribe(event: string, listener: EventEmitterCallback): void;
+        public unsubscribe(
+            event: string,
+            listener: EventEmitterCallback
+        ): void;
+
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        public emit(event: string, args: any): void;
+
+        public unsubscribeToAll(): void;
+    }
+
+    export interface Flow {
+        name: string;
+        ref: string;
+        initialFlowMessage: {
+            ref: string;
+            content: string;
+        };
+        flowMessage: {
+            ref: string;
+            contentType: string;
+            content: MessageContent;
+            urlFile?: string;
+            nextRef?: string;
+            defaultResponseRef?: string;
+            response: {
+                ref: string;
+                key: Array<string>;
+            }[];
+            defaultResponse?: string;
+        }[];
     }
 }
 

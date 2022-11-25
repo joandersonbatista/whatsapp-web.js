@@ -11,6 +11,7 @@ exports.DefaultOptions = {
     webVersionCache: {
         type: 'local',
     },
+    emitBrowserClose: undefined,
     authTimeoutMs: 0,
     qrMaxRetries: 0,
     takeoverOnConflict: false,
@@ -63,7 +64,9 @@ exports.Events = {
     STATE_CHANGED: 'change_state',
     BATTERY_CHANGED: 'change_battery',
     INCOMING_CALL: 'call',
-    REMOTE_SESSION_SAVED: 'remote_session_saved'
+    REMOTE_SESSION_SAVED: 'remote_session_saved',
+    NEW_CONTACT: 'new_contact',
+    ADD_CONTACT_IN_SEQUENCE: 'add_contact_in_sequence'
 };
 
 /**
